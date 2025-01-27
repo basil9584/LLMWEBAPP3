@@ -1,7 +1,5 @@
+import logging
 import os
-import shutil
-import json
-from abc import ABC, abstractmethod
 from typing import BinaryIO, Tuple
 
 import boto3
@@ -17,10 +15,20 @@ from open_webui.config import (
     STORAGE_PROVIDER,
     UPLOAD_DIR,
 )
+
+# Add B2 configuration to config.py
+from open_webui.config import (
+    B2_BUCKET_NAME,
+    B2_ENDPOINT_URL,
+    B2_KEY_ID,
+    B2_KEY_SECRET,
+)
+
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError, NotFound
 from open_webui.constants import ERROR_MESSAGES
 
+from b2sdk.v2 import InMemoryAccountInfo, B2Api
 
 class StorageProvider(ABC):
     @abstractmethod
@@ -38,7 +46,6 @@ class StorageProvider(ABC):
     @abstractmethod
     def delete_file(self, file_path: str) -> None:
         pass
-
 
 class LocalStorageProvider(StorageProvider):
     @staticmethod
@@ -81,7 +88,6 @@ class LocalStorageProvider(StorageProvider):
                     print(f"Failed to delete {file_path}. Reason: {e}")
         else:
             print(f"Directory {UPLOAD_DIR} not found in local storage.")
-
 
 class S3StorageProvider(StorageProvider):
     def __init__(self):
@@ -141,7 +147,6 @@ class S3StorageProvider(StorageProvider):
 
         # Always delete from local storage
         LocalStorageProvider.delete_all_files()
-
 
 class GCSStorageProvider(StorageProvider):
     def __init__(self):
@@ -206,6 +211,74 @@ class GCSStorageProvider(StorageProvider):
         # Always delete from local storage
         LocalStorageProvider.delete_all_files()
 
+class B2StorageProvider(StorageProvider):
+    def __init__(self):
+        info = InMemoryAccountInfo()
+        self.b2_api = B2Api(info)
+        self.b2_api.authorize_account("production", B2_KEY_ID, B2_KEY_SECRET)
+        self.bucket_name = B2_BUCKET_NAME
+        self.bucket = self.b2_api.get_bucket_by_name(self.bucket_name)
+
+    def upload_file(self, file: BinaryIO, filename: str) -> Tuple[bytes, str]:
+        """Handles uploading of the file to B2 storage."""
+        contents, file_path = LocalStorageProvider.upload_file(file, filename)
+        try:
+            # Upload the file
+            b2_file = self.bucket.upload_local_file(
+                local_file=file_path,
+                file_name=filename,
+            )
+
+            # Construct the download URL
+            file_id = b2_file.id_
+            download_url = f"{B2_ENDPOINT_URL}/file/{self.bucket_name}/{filename}?fileId={file_id}"
+
+            return contents, download_url
+        except Exception as e:
+            raise RuntimeError(f"Error uploading file to B2: {e}")
+
+    def get_file(self, file_path: str) -> str:
+        """Handles downloading of the file from B2 storage."""
+        try:
+            # Extract the file name (key) from the B2 file path.
+            file_name = file_path.split("/")[-1]
+
+            # Download the file.
+            file_content = self.bucket.download_file_by_name(file_name).get_bytes_written()
+
+            # Save the downloaded file locally (you might want to customize the path).
+            local_file_path = os.path.join(UPLOAD_DIR, file_name)
+            with open(local_file_path, "wb") as local_file:
+                local_file.write(file_content)
+
+            return local_file_path
+        except Exception as e:
+            raise RuntimeError(f"Error downloading file from B2: {e}")
+
+    def delete_file(self, file_path: str) -> None:
+        """Handles deletion of the file from B2 storage."""
+        try:
+            file_name = file_path.split("/")[-1]
+            file_version = self.bucket.get_file_info_by_name(file_name).as_dict()
+            self.bucket.delete_file_version(file_version["fileId"], file_name)
+        except Exception as e:
+            raise RuntimeError(f"Error deleting file from B2: {e}")
+
+        # Always delete from local storage
+        LocalStorageProvider.delete_file(file_path)
+
+    def delete_all_files(self) -> None:
+        """Handles deletion of all files from B2 storage."""
+        try:
+            for file_version in self.bucket.ls():
+                self.bucket.delete_file_version(
+                    file_version.id_, file_version.file_name
+                )
+        except Exception as e:
+            raise RuntimeError(f"Error deleting all files from B2: {e}")
+
+        # Always delete from local storage
+        LocalStorageProvider.delete_all_files()
 
 def get_storage_provider(storage_provider: str):
     if storage_provider == "local":
@@ -214,9 +287,10 @@ def get_storage_provider(storage_provider: str):
         Storage = S3StorageProvider()
     elif storage_provider == "gcs":
         Storage = GCSStorageProvider()
+    elif storage_provider == "b2":
+        Storage = B2StorageProvider()
     else:
         raise RuntimeError(f"Unsupported storage provider: {storage_provider}")
     return Storage
-
 
 Storage = get_storage_provider(STORAGE_PROVIDER)
