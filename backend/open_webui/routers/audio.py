@@ -45,9 +45,6 @@ from open_webui.env import (
 
 router = APIRouter()
 
-# Constants
-MAX_FILE_SIZE_MB = 25
-MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["AUDIO"])
@@ -138,6 +135,7 @@ class STTConfigForm(BaseModel):
     ENGINE: str
     MODEL: str
     WHISPER_MODEL: str
+    MAX_FILE_SIZE_MB: float
 
 
 class AudioConfigUpdateForm(BaseModel):
@@ -165,6 +163,7 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
             "ENGINE": request.app.state.config.STT_ENGINE,
             "MODEL": request.app.state.config.STT_MODEL,
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL,
+            "MAX_FILE_SIZE_MB": request.app.state.config.STT_MAX_FILE_SIZE_MB,
         },
     }
 
@@ -190,6 +189,7 @@ async def update_audio_config(
     request.app.state.config.STT_ENGINE = form_data.stt.ENGINE
     request.app.state.config.STT_MODEL = form_data.stt.MODEL
     request.app.state.config.WHISPER_MODEL = form_data.stt.WHISPER_MODEL
+    request.app.state.config.STT_MAX_FILE_SIZE_MB = form_data.stt.MAX_FILE_SIZE_MB
 
     if request.app.state.config.STT_ENGINE == "":
         request.app.state.faster_whisper_model = set_faster_whisper_model(
@@ -214,6 +214,7 @@ async def update_audio_config(
             "ENGINE": request.app.state.config.STT_ENGINE,
             "MODEL": request.app.state.config.STT_MODEL,
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL,
+            "MAX_FILE_SIZE_MB": request.app.state.config.STT_MAX_FILE_SIZE_MB,
         },
     }
 
@@ -522,7 +523,11 @@ def transcribe(request: Request, file_path):
             raise Exception(detail if detail else "Open WebUI: Server Connection Error")
 
 
-def compress_audio(file_path):
+def compress_audio(request, file_path):
+        
+    MAX_FILE_SIZE_MB = float(request.app.state.config.STT_MAX_FILE_SIZE_MB)
+    MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
+
     if os.path.getsize(file_path) > MAX_FILE_SIZE:
         file_dir = os.path.dirname(file_path)
         audio = AudioSegment.from_file(file_path)
@@ -570,7 +575,7 @@ def transcription(
 
         try:
             try:
-                file_path = compress_audio(file_path)
+                file_path = compress_audio(request, file_path)
             except Exception as e:
                 log.exception(e)
 
